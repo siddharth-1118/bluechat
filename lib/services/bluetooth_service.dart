@@ -301,4 +301,19 @@ class BluetoothService {
       return false;
     }
   }
+
+  Future<bool> shareFile(String filePath, {String mimeType = '*/*'}) async {
+    print("BlueChat [Transport LOG]: Invoking shareFile for path: $filePath (mime: $mimeType)");
+    try {
+      final bool? result = await _methodChannel.invokeMethod<bool>('shareFile', {
+        'filePath': filePath,
+        'mimeType': mimeType,
+      });
+      print("BlueChat [Transport LOG]: shareFile result: $result");
+      return result ?? false;
+    } on PlatformException catch (e) {
+      print("BlueChat [Transport LOG]: shareFile failed: ${e.message}");
+      return false;
+    }
+  }
 }

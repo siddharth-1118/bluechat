@@ -66,4 +66,69 @@ class FileTransferService {
     }
     return "${speed.toStringAsFixed(1)} ${suffixes[suffixIndex]}";
   }
+
+  /// Returns a MIME type for a file name, used when sharing files to other apps.
+  static String getMimeType(String? fileName) {
+    if (fileName == null || !fileName.contains('.')) return "*/*";
+    final ext = fileName.split('.').last.toLowerCase();
+    switch (ext) {
+      case 'jpg':
+      case 'jpeg':
+        return "image/jpeg";
+      case 'png':
+        return "image/png";
+      case 'gif':
+        return "image/gif";
+      case 'webp':
+        return "image/webp";
+      case 'bmp':
+        return "image/bmp";
+      case 'mp4':
+        return "video/mp4";
+      case 'mov':
+        return "video/quicktime";
+      case '3gp':
+        return "video/3gpp";
+      case 'mkv':
+        return "video/x-matroska";
+      case 'webm':
+        return "video/webm";
+      case 'avi':
+        return "video/x-msvideo";
+      case 'mp3':
+        return "audio/mpeg";
+      case 'wav':
+        return "audio/wav";
+      case 'aac':
+        return "audio/aac";
+      case 'flac':
+        return "audio/flac";
+      case 'ogg':
+        return "audio/ogg";
+      case 'pdf':
+        return "application/pdf";
+      case 'apk':
+        return "application/vnd.android.package-archive";
+      case 'txt':
+        return "text/plain";
+      case 'doc':
+        return "application/msword";
+      case 'docx':
+        return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+      case 'xls':
+        return "application/vnd.ms-excel";
+      case 'xlsx':
+        return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+      case 'ppt':
+        return "application/vnd.ms-powerpoint";
+      case 'pptx':
+        return "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+      case 'rtf':
+        return "application/rtf";
+      case 'zip':
+        return "application/zip";
+      default:
+        return "*/*";
+    }
+  }
 }

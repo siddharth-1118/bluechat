@@ -12,6 +12,8 @@ import android.os.IBinder
 import android.util.Log
 import androidx.annotation.NonNull
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
+import java.io.File
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
@@ -349,6 +351,32 @@ class MainActivity : FlutterActivity() {
                     result.success(true)
                 } else {
                     result.error("INVALID_ARGUMENT", "Session ID is required", null)
+                }
+            }
+            "shareFile" -> {
+                val filePath = call.argument<String>("filePath")
+                val mimeType = call.argument<String>("mimeType") ?: "*/*"
+                if (filePath == null) {
+                    result.error("INVALID_ARGUMENT", "filePath is required", null)
+                    return
+                }
+                val file = File(filePath)
+                if (!file.exists() || !file.isFile) {
+                    result.error("FILE_NOT_FOUND", "File does not exist: $filePath", null)
+                    return
+                }
+                try {
+                    val uri = FileProvider.getUriForFile(this, "${packageName}.fileprovider", file)
+                    val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                        type = mimeType
+                        putExtra(Intent.EXTRA_STREAM, uri)
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
+                    startActivity(Intent.createChooser(shareIntent, "Share file via"))
+                    result.success(true)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to share file: ${e.message}", e)
+                    result.error("SHARE_FAILED", "Failed to share file: ${e.message}", null)
                 }
             }
             "getMyAddress" -> {

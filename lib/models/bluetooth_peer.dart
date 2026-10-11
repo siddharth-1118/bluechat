@@ -9,6 +9,7 @@ class BluetoothPeer {
   final String? customName;
   final String? profilePhoto;
   final String connectionStatus; // 'none', 'pending_sent', 'pending_received', 'approved'
+  final String? notes; // Offline contact notes
 
   BluetoothPeer({
     required this.name,
@@ -21,6 +22,7 @@ class BluetoothPeer {
     this.customName,
     this.profilePhoto,
     this.connectionStatus = 'none',
+    this.notes,
   });
 
   BluetoothPeer copyWith({
@@ -34,6 +36,7 @@ class BluetoothPeer {
     String? customName,
     String? profilePhoto,
     String? connectionStatus,
+    String? notes,
   }) {
     return BluetoothPeer(
       name: name ?? this.name,
@@ -46,6 +49,7 @@ class BluetoothPeer {
       customName: customName ?? this.customName,
       profilePhoto: profilePhoto ?? this.profilePhoto,
       connectionStatus: connectionStatus ?? this.connectionStatus,
+      notes: notes ?? this.notes,
     );
   }
 
@@ -60,6 +64,7 @@ class BluetoothPeer {
       'custom_name': customName,
       'profile_photo': profilePhoto,
       'connection_status': connectionStatus,
+      'notes': notes,
     };
   }
 
@@ -74,6 +79,7 @@ class BluetoothPeer {
       customName: map['custom_name'],
       profilePhoto: map['profile_photo'],
       connectionStatus: map['connection_status'] ?? 'none',
+      notes: map['notes'],
     );
   }
 }

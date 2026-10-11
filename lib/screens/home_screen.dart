@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -10,8 +11,10 @@ import '../database/database_helper.dart';
 import '../providers/chat_provider.dart';
 import '../providers/profile_provider.dart';
 import '../models/bluetooth_peer.dart';
+import '../models/chat_message.dart';
 import '../services/bluetooth_service.dart';
 import '../services/signal_weaver_service.dart';
+import '../services/wan_link_service.dart';
 import 'devices_screen.dart';
 import 'chat_screen.dart';
 import 'qr_code_screen.dart';
@@ -101,6 +104,218 @@ class _HomeScreenState extends State<HomeScreen> {
     } else {
       return DateFormat('dd/MM/yy').format(dateTime);
     }
+  }
+
+  void _showSosBeaconDialog(BuildContext context, ChatProvider chatProvider, ProfileProvider profileProvider) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final detailsController = TextEditingController();
+
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: isDark ? const Color(0xFF1E293B) : Colors.white,
+        title: const Row(
+          children: [
+            Icon(Icons.warning_amber_rounded, color: Colors.redAccent, size: 28),
+            SizedBox(width: 8),
+            Text(
+              "Emergency SOS Beacon",
+              style: TextStyle(color: Colors.redAccent, fontWeight: FontWeight.bold),
+            ),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              "Instantly broadcast a high-priority distress alert to all nearby Bluetooth mesh nodes and paired contacts without manual pairing.",
+              style: TextStyle(color: isDark ? Colors.white70 : Colors.black87, fontSize: 13),
+            ),
+            const SizedBox(height: 16),
+            TextField(
+              controller: detailsController,
+              style: TextStyle(color: isDark ? Colors.white : Colors.black87),
+              decoration: InputDecoration(
+                hintText: "Optional details (e.g. Need medical help, GPS/Mile marker)...",
+                hintStyle: const TextStyle(color: Colors.grey, fontSize: 12),
+                focusedBorder: OutlineInputBorder(
+                  borderSide: const BorderSide(color: Colors.redAccent),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                enabledBorder: OutlineInputBorder(
+                  borderSide: BorderSide(color: isDark ? Colors.white24 : Colors.black12),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text("Cancel", style: TextStyle(color: Colors.grey)),
+          ),
+          ElevatedButton.icon(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.redAccent,
+              foregroundColor: Colors.white,
+            ),
+            icon: const Icon(Icons.emergency_share, size: 18),
+            label: const Text("Broadcast SOS Now", style: TextStyle(fontWeight: FontWeight.bold)),
+            onPressed: () async {
+              Navigator.pop(context);
+              await chatProvider.broadcastSosAlert(
+                profileProvider.username,
+                customDetails: detailsController.text.trim(),
+              );
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text("🚨 High-priority Emergency SOS Beacon broadcasted!"),
+                  backgroundColor: Colors.redAccent,
+                  duration: Duration(seconds: 4),
+                ),
+              );
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showStarredMessagesSheet(BuildContext context, ChatProvider chatProvider) async {
+    final starred = await chatProvider.getStarredMessages();
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+
+    if (!mounted) return;
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: isDark ? const Color(0xFF1E293B) : Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (context) {
+        return SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+                child: Row(
+                  children: [
+                    const Icon(Icons.star, color: Colors.amber, size: 24),
+                    const SizedBox(width: 8),
+                    Text(
+                      "Starred Messages (${starred.length})",
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                        color: isDark ? Colors.white : Colors.black87,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const Divider(height: 1),
+              if (starred.isEmpty)
+                const Padding(
+                  padding: EdgeInsets.all(40),
+                  child: Column(
+                    children: [
+                      Icon(Icons.star_outline, size: 48, color: Colors.grey),
+                      SizedBox(height: 12),
+                      Text("No starred messages yet", style: TextStyle(color: Colors.grey)),
+                    ],
+                  ),
+                )
+              else
+                Flexible(
+                  child: ListView.separated(
+                    shrinkWrap: true,
+                    itemCount: starred.length,
+                    separatorBuilder: (_, __) => const Divider(height: 1),
+                    itemBuilder: (context, index) {
+                      final msg = starred[index];
+                      return ListTile(
+                        leading: CircleAvatar(
+                          backgroundColor: Colors.amber.withOpacity(0.15),
+                          child: const Icon(Icons.star, color: Colors.amber, size: 20),
+                        ),
+                        title: Text(
+                          msg.body,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(color: isDark ? Colors.white : Colors.black87),
+                        ),
+                        subtitle: Text(
+                          "${msg.isSelf ? 'You' : msg.senderName} • ${DateFormat('dd MMM hh:mm a').format(msg.timestamp)}",
+                          style: const TextStyle(fontSize: 11, color: Colors.grey),
+                        ),
+                        trailing: IconButton(
+                          icon: const Icon(Icons.star, color: Colors.amber, size: 20),
+                          tooltip: "Unstar",
+                          onPressed: () async {
+                            await chatProvider.toggleMessageStarred(msg.sessionId, msg.id, false);
+                            Navigator.pop(context);
+                            _showStarredMessagesSheet(context, chatProvider);
+                          },
+                        ),
+                      );
+                    },
+                  ),
+                ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  void _showPanicWipeDialog(BuildContext context, ChatProvider chatProvider) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: isDark ? const Color(0xFF1E293B) : Colors.white,
+        title: const Row(
+          children: [
+            Icon(Icons.dangerous, color: Colors.redAccent, size: 28),
+            SizedBox(width: 8),
+            Text(
+              "Stealth Panic Wipe",
+              style: TextStyle(color: Colors.redAccent, fontWeight: FontWeight.bold),
+            ),
+          ],
+        ),
+        content: Text(
+          "DANGER: This action instantly and permanently wipes all chat histories, messages, peer records, and Diffie-Hellman encryption keys from this device.\n\nAre you sure you want to proceed?",
+          style: TextStyle(color: isDark ? Colors.white70 : Colors.black87, fontSize: 13),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text("Cancel", style: TextStyle(color: Colors.grey)),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.redAccent,
+              foregroundColor: Colors.white,
+            ),
+            child: const Text("PURGE ALL DATA", style: TextStyle(fontWeight: FontWeight.bold)),
+            onPressed: () async {
+              Navigator.pop(context);
+              await chatProvider.performPanicWipe();
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text("⚠️ Local database and cryptographic keys successfully purged."),
+                  backgroundColor: Colors.redAccent,
+                ),
+              );
+            },
+          ),
+        ],
+      ),
+    );
   }
 
   void _showCreateGroupDialog(BuildContext context, ChatProvider chatProvider, ProfileProvider profileProvider) async {
@@ -261,6 +476,53 @@ class _HomeScreenState extends State<HomeScreen> {
         backgroundColor: isDark ? const Color(0xFF1E293B) : primaryColor,
         foregroundColor: Colors.white,
         actions: [
+          StreamBuilder<String>(
+            stream: WanLinkService.instance.statusStream,
+            initialData: WanLinkService.instance.status,
+            builder: (context, snapshot) {
+              final status = snapshot.data ?? 'offline';
+              final enabled = WanLinkService.instance.isEnabled;
+              final icon = status == 'online'
+                  ? Icons.cloud_done
+                  : status == 'connecting'
+                      ? Icons.cloud_sync
+                      : Icons.cloud_off;
+              final color = !enabled
+                  ? Colors.white24
+                  : status == 'online'
+                      ? Colors.lightGreenAccent
+                      : status == 'connecting'
+                          ? Colors.amberAccent
+                          : Colors.white54;
+              final label = !enabled
+                  ? "Cloud Relay disabled (tap to enable)"
+                  : status == 'online'
+                      ? "Cloud Relay online — far-away contacts reachable (tap to disable)"
+                      : status == 'connecting'
+                          ? "Cloud Relay connecting..."
+                          : "Cloud Relay offline — retrying (tap to toggle)";
+              return IconButton(
+                icon: Icon(icon, color: color, size: 22),
+                tooltip: label,
+                onPressed: () {
+                  WanLinkService.instance.setEnabled(!enabled);
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text(!enabled
+                          ? "Cloud Relay enabled — far-away contacts are reachable."
+                          : "Cloud Relay disabled — Bluetooth only."),
+                      duration: const Duration(seconds: 2),
+                    ),
+                  );
+                },
+              );
+            },
+          ),
+          IconButton(
+            icon: const Icon(Icons.search),
+            tooltip: "Search Messages",
+            onPressed: () => _showMessageSearchDialog(context, chatProvider),
+          ),
           IconButton(
             icon: const Icon(Icons.qr_code_scanner),
             tooltip: "QR Pairing",
@@ -352,6 +614,30 @@ class _HomeScreenState extends State<HomeScreen> {
                   context,
                   MaterialPageRoute(builder: (context) => const GmailBackupScreen()),
                 );
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.star, color: Colors.amber),
+              title: const Text("Starred Messages"),
+              onTap: () {
+                Navigator.pop(context);
+                _showStarredMessagesSheet(context, chatProvider);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.emergency_share, color: Colors.redAccent),
+              title: const Text("Emergency SOS Beacon"),
+              onTap: () {
+                Navigator.pop(context);
+                _showSosBeaconDialog(context, chatProvider, profileProvider);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.delete_forever, color: Colors.deepOrangeAccent),
+              title: const Text("Stealth Panic Wipe"),
+              onTap: () {
+                Navigator.pop(context);
+                _showPanicWipeDialog(context, chatProvider);
               },
             ),
             if (chatProvider.connectedDevices.isNotEmpty)
@@ -786,6 +1072,150 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
         );
       },
+    );
+  }
+
+  Timer? _searchDebounce;
+
+  void _showMessageSearchDialog(BuildContext context, ChatProvider chatProvider) {
+    final controller = TextEditingController();
+    List<ChatMessage> results = [];
+    bool loading = false;
+    String searched = "";
+
+    String chatNameFor(String sessionId) {
+      final idx = chatProvider.chatSessions.indexWhere((s) => s.id == sessionId);
+      return idx != -1 ? chatProvider.chatSessions[idx].name : sessionId;
+    }
+
+    showDialog(
+      context: context,
+      barrierDismissible: true,
+      builder: (dialogCtx) => StatefulBuilder(
+        builder: (dialogCtx, setModalState) {
+          return AlertDialog(
+            backgroundColor: const Color(0xFF1E293B),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+            title: const Text(
+              "Search Messages",
+              style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16),
+            ),
+            content: SizedBox(
+              width: double.maxFinite,
+              height: 400,
+              child: Column(
+                children: [
+                  TextField(
+                    controller: controller,
+                    autofocus: true,
+                    style: const TextStyle(color: Colors.white),
+                    decoration: InputDecoration(
+                      hintText: "Type to search every chat...",
+                      hintStyle: const TextStyle(color: Colors.white38),
+                      prefixIcon: const Icon(Icons.search, color: Colors.white54),
+                      filled: true,
+                      fillColor: const Color(0xFF0F172A),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        borderSide: BorderSide.none,
+                      ),
+                    ),
+                    onChanged: (value) {
+                      _searchDebounce?.cancel();
+                      final q = value.trim();
+                      if (q.isEmpty) {
+                        setModalState(() {
+                          results = [];
+                          searched = "";
+                          loading = false;
+                        });
+                        return;
+                      }
+                      setModalState(() {
+                        loading = true;
+                      });
+                      _searchDebounce = Timer(const Duration(milliseconds: 250), () async {
+                        final r = await chatProvider.searchMessages(q);
+                        setModalState(() {
+                          results = r;
+                          searched = q;
+                          loading = false;
+                        });
+                      });
+                    },
+                  ),
+                  const SizedBox(height: 12),
+                  Expanded(
+                    child: loading
+                        ? const Center(child: CircularProgressIndicator(color: Colors.tealAccent))
+                        : results.isEmpty
+                            ? Center(
+                                child: Text(
+                                  searched.isEmpty
+                                      ? "Search across every conversation stored on this device."
+                                      : "No messages found for \"$searched\".",
+                                  style: const TextStyle(color: Colors.white54, fontSize: 13),
+                                  textAlign: TextAlign.center,
+                                ),
+                              )
+                            : ListView.builder(
+                                itemCount: results.length,
+                                itemBuilder: (listCtx, i) {
+                                  final m = results[i];
+                                  final chatName = chatNameFor(m.sessionId);
+                                  return ListTile(
+                                    dense: true,
+                                    contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+                                    leading: CircleAvatar(
+                                      radius: 16,
+                                      backgroundColor: Colors.tealAccent.withOpacity(0.15),
+                                      child: Text(                                        chatName.isNotEmpty ? chatName[0].toUpperCase() : "?",
+                                        style: const TextStyle(color: Colors.tealAccent, fontSize: 13, fontWeight: FontWeight.bold),
+                                      ),
+                                    ),
+                                    title: Text(
+                                      chatName,
+                                      style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13),
+                                    ),
+                                    subtitle: Text(
+                                      "${m.isSelf ? 'You' : m.senderName}: ${m.body}",
+                                      maxLines: 2,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(color: Colors.white70, fontSize: 12),
+                                    ),
+                                    trailing: Text(
+                                      DateFormat('dd MMM\nhh:mm a').format(m.timestamp),
+                                      style: const TextStyle(color: Colors.white38, fontSize: 10),
+                                      textAlign: TextAlign.right,
+                                    ),
+                                    onTap: () {
+                                      Navigator.pop(dialogCtx);
+                                      Navigator.push(
+                                        context,
+                                        MaterialPageRoute(
+                                          builder: (_) => ChatScreen(
+                                            sessionId: m.sessionId,
+                                            sessionName: chatName,
+                                          ),
+                                        ),
+                                      );
+                                    },
+                                  );
+                                },
+                              ),
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(dialogCtx),
+                child: const Text("Close", style: TextStyle(color: Colors.tealAccent)),
+              ),
+            ],
+          );
+        },
+      ),
     );
   }
 

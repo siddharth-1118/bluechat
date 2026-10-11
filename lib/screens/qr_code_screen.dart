@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:qr_flutter/qr_flutter.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../providers/chat_provider.dart';
@@ -27,46 +28,58 @@ class _QrCodeScreenState extends State<QrCodeScreen> with SingleTickerProviderSt
   bool _checkingPermission = true;
   bool _isConnecting = false;
   
-  MobileScannerController? _scannerController;
+  late final MobileScannerController _scannerController;
   int _currentTabIndex = 0;
+  bool _isTorchOn = false;
 
   @override
   void initState() {
     super.initState();
+    _scannerController = MobileScannerController(
+      detectionSpeed: DetectionSpeed.noDuplicates,
+      facing: CameraFacing.back,
+      torchEnabled: false,
+      autoStart: false,
+    );
     _tabController = TabController(length: 2, vsync: this);
     _tabController.addListener(_handleTabChange);
     _loadMacAddress();
     _checkCameraPermission();
-    
-    // Proactively initialize the controller so we can control its start/stop state reliably
-    _scannerController = MobileScannerController(
-      autoStart: false, // Do not start until the user opens the scan tab
-    );
   }
 
   void _handleTabChange() {
-    if (mounted) {
+    if (_currentTabIndex != _tabController.index) {
       setState(() {
         _currentTabIndex = _tabController.index;
       });
-    }
-    if (_tabController.index == 1) {
-      // Switched to Scanner tab
-      if (!_hasCameraPermission) {
-        _requestCameraPermission();
+      if (_tabController.index == 1) {
+        // Switched to Scanner tab
+        if (!_hasCameraPermission) {
+          _requestCameraPermission();
+        } else {
+          _startScanner();
+        }
       } else {
-        LogScannerAction("Starting camera on tab switch");
-        _scannerController?.start();
+        // Switched away from Scanner tab
+        _stopScanner();
       }
-    } else {
-      // Switched away from Scanner tab
-      LogScannerAction("Stopping camera on tab switch");
-      _scannerController?.stop();
     }
   }
 
-  void LogScannerAction(String msg) {
-    print("QrCodeScreen [Scanner LOG]: $msg");
+  void _startScanner() {
+    try {
+      _scannerController.start();
+    } catch (e) {
+      print("QrCodeScreen: Error starting scanner: $e");
+    }
+  }
+
+  void _stopScanner() {
+    try {
+      _scannerController.stop();
+    } catch (e) {
+      print("QrCodeScreen: Error stopping scanner: $e");
+    }
   }
 
   Future<void> _loadMacAddress() async {
@@ -90,8 +103,7 @@ class _QrCodeScreenState extends State<QrCodeScreen> with SingleTickerProviderSt
         _checkingPermission = false;
       });
       if (status.isGranted && _tabController.index == 1) {
-        LogScannerAction("Starting camera after checking permission");
-        _scannerController?.start();
+        _startScanner();
       }
     }
   }
@@ -103,9 +115,32 @@ class _QrCodeScreenState extends State<QrCodeScreen> with SingleTickerProviderSt
         _hasCameraPermission = status.isGranted;
       });
       if (status.isGranted && _tabController.index == 1) {
-        LogScannerAction("Starting camera after granting permission");
-        _scannerController?.start();
+        _startScanner();
       }
+    }
+  }
+
+  Future<void> _pickQrImageFromGallery() async {
+    try {
+      final result = await FilePicker.platform.pickFiles(type: FileType.image);
+      if (result != null && result.files.single.path != null) {
+        final path = result.files.single.path!;
+        final capture = await _scannerController.analyzeImage(path);
+        if (capture != null && capture.barcodes.isNotEmpty) {
+          _onDetect(capture);
+        } else {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text("No QR code detected in the selected image."),
+                backgroundColor: Colors.orangeAccent,
+              ),
+            );
+          }
+        }
+      }
+    } catch (e) {
+      print("QrCodeScreen: Error scanning image from gallery: $e");
     }
   }
 
@@ -113,26 +148,8 @@ class _QrCodeScreenState extends State<QrCodeScreen> with SingleTickerProviderSt
   void dispose() {
     _tabController.removeListener(_handleTabChange);
     _tabController.dispose();
-    _stopAndDisposeScanner();
+    _scannerController.dispose();
     super.dispose();
-  }
-
-  Future<void> _stopAndDisposeScanner() async {
-    final controller = _scannerController;
-    _scannerController = null;
-    if (controller != null) {
-      LogScannerAction("Tearing down scanner controller...");
-      try {
-        await controller.stop();
-      } catch (e) {
-        print("QrCodeScreen: Error stopping controller: $e");
-      }
-      try {
-        controller.dispose();
-      } catch (e) {
-        print("QrCodeScreen: Error disposing controller: $e");
-      }
-    }
   }
 
   void _onDetect(BarcodeCapture capture) async {
@@ -153,12 +170,7 @@ class _QrCodeScreenState extends State<QrCodeScreen> with SingleTickerProviderSt
             });
 
             // Stop camera immediately to prevent multiple scans and release resource
-            LogScannerAction("QR code detected. Stopping camera during pairing selection.");
-            try {
-              await _scannerController?.stop();
-            } catch (e) {
-              print("QrCodeScreen: Error stopping controller on detect: $e");
-            }
+            _stopScanner();
 
             // Vibrate to confirm scan
             try {
@@ -192,8 +204,7 @@ class _QrCodeScreenState extends State<QrCodeScreen> with SingleTickerProviderSt
                           _isConnecting = false;
                         });
                         // Resume camera scanning since pairing was cancelled
-                        LogScannerAction("Pairing cancelled. Restarting camera.");
-                        _scannerController?.start();
+                        _startScanner();
                       },
                       child: const Text("Cancel", style: TextStyle(color: Colors.grey)),
                     ),
@@ -470,8 +481,46 @@ class _QrCodeScreenState extends State<QrCodeScreen> with SingleTickerProviderSt
     return Stack(
       children: [
         MobileScanner(
-          onDetect: _onDetect,
           controller: _scannerController,
+          onDetect: _onDetect,
+          errorBuilder: (context, error, child) {
+            return Center(
+              child: Padding(
+                padding: const EdgeInsets.all(24.0),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.videocam_off_outlined, size: 56, color: Colors.orangeAccent),
+                    const SizedBox(height: 16),
+                    Text(
+                      'Camera unavailable: ${error.errorCode.name}',
+                      style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold),
+                    ),
+                    const SizedBox(height: 8),
+                    const Text(
+                      'You can retry restarting the camera, or pick a QR code image from your gallery.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: Colors.white70, fontSize: 13),
+                    ),
+                    const SizedBox(height: 20),
+                    ElevatedButton.icon(
+                      style: ElevatedButton.styleFrom(backgroundColor: themeColor),
+                      onPressed: () => _startScanner(),
+                      icon: const Icon(Icons.refresh, color: Colors.white),
+                      label: const Text('Retry Camera', style: TextStyle(color: Colors.white)),
+                    ),
+                    const SizedBox(height: 12),
+                    OutlinedButton.icon(
+                      style: OutlinedButton.styleFrom(side: const BorderSide(color: Colors.teal)),
+                      onPressed: _pickQrImageFromGallery,
+                      icon: const Icon(Icons.photo_library, color: Colors.teal),
+                      label: const Text('Pick Image from Gallery', style: TextStyle(color: Colors.teal)),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
         ),
         // Overlay scanner UI
         Center(
@@ -484,14 +533,76 @@ class _QrCodeScreenState extends State<QrCodeScreen> with SingleTickerProviderSt
             ),
           ),
         ),
-        const Positioned(
+        // Top Toolbar (Flashlight, Camera Switch, Pick Gallery)
+        Positioned(
+          top: 16,
+          left: 16,
+          right: 16,
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+            children: [
+              Container(
+                decoration: BoxDecoration(
+                  color: Colors.black54,
+                  borderRadius: BorderRadius.circular(30),
+                ),
+                child: IconButton(
+                  icon: Icon(_isTorchOn ? Icons.flash_on : Icons.flash_off, color: _isTorchOn ? Colors.amberAccent : Colors.white),
+                  tooltip: "Toggle Flashlight",
+                  onPressed: () async {
+                    try {
+                      await _scannerController?.toggleTorch();
+                      setState(() {
+                        _isTorchOn = !_isTorchOn;
+                      });
+                    } catch (_) {}
+                  },
+                ),
+              ),
+              Container(
+                decoration: BoxDecoration(
+                  color: Colors.black54,
+                  borderRadius: BorderRadius.circular(30),
+                ),
+                child: IconButton(
+                  icon: const Icon(Icons.flip_camera_ios, color: Colors.white),
+                  tooltip: "Switch Camera",
+                  onPressed: () async {
+                    try {
+                      await _scannerController?.switchCamera();
+                    } catch (_) {}
+                  },
+                ),
+              ),
+              Container(
+                decoration: BoxDecoration(
+                  color: Colors.black54,
+                  borderRadius: BorderRadius.circular(30),
+                ),
+                child: IconButton(
+                  icon: const Icon(Icons.photo_library, color: Colors.white),
+                  tooltip: "Scan Image from Gallery",
+                  onPressed: _pickQrImageFromGallery,
+                ),
+              ),
+            ],
+          ),
+        ),
+        Positioned(
           bottom: 40,
           left: 0,
           right: 0,
           child: Center(
-            child: Text(
-              'Align the QR code within the frame to scan',
-              style: TextStyle(color: Colors.white, fontSize: 16, backgroundColor: Colors.black54),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              decoration: BoxDecoration(
+                color: Colors.black54,
+                borderRadius: BorderRadius.circular(20),
+              ),
+              child: const Text(
+                'Align the QR code within the frame to scan',
+                style: TextStyle(color: Colors.white, fontSize: 14),
+              ),
             ),
           ),
         ),

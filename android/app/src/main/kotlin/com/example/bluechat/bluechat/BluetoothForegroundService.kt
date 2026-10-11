@@ -154,9 +154,20 @@ class BluetoothForegroundService : Service() {
                 // 1. Ensure server is running to accept connections
                 bluetoothManager.startServer()
 
-                // 2. Fetch known peers and try to connect to disconnected ones
-                val savedPeers = bluetoothManager.getSavedPeerAddresses(applicationContext)
-                for (address in savedPeers) {
+                // 2. Fetch known peers and bonded devices, and try to connect to disconnected ones
+                val targetAddresses = bluetoothManager.getSavedPeerAddresses(applicationContext).toMutableSet()
+                try {
+                    val bonded = adapter.bondedDevices
+                    if (bonded != null) {
+                        for (d in bonded) {
+                            targetAddresses.add(d.address)
+                        }
+                    }
+                } catch (e: SecurityException) {
+                    android.util.Log.e("BlueChat", "SecurityException reading bonded devices: ${e.message}")
+                }
+
+                for (address in targetAddresses) {
                     if (!bluetoothManager.isConnected(address) && !bluetoothManager.isConnecting(address)) {
                         bluetoothManager.connectToDevice(address)
                     }
@@ -175,7 +186,7 @@ class BluetoothForegroundService : Service() {
                     android.util.Log.e("BlueChat", "SecurityException in auto discovery loop: ${e.message}")
                 }
             }
-        }, 5, 20, TimeUnit.SECONDS)
+        }, 3, 15, TimeUnit.SECONDS)
     }
 
     fun updateForegroundTypes(hasMic: Boolean, hasCamera: Boolean) {

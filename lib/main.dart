@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'providers/chat_provider.dart';
 import 'providers/profile_provider.dart';
+import 'services/email_backup_service.dart';
 import 'screens/profile_setup_screen.dart';
 import 'screens/home_screen.dart';
 import 'widgets/call_overlay.dart';
@@ -18,6 +19,9 @@ void main() async {
 
   final profileProvider = ProfileProvider();
   await profileProvider.loadProfile();
+
+  // Load runtime SMTP config (if any) so backup features report the true status.
+  await EmailBackupService.instance.loadConfig();
 
   final chatProvider = ChatProvider();
 

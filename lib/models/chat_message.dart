@@ -20,6 +20,9 @@ class ChatMessage {
   // Reaction properties
   final String? reaction;
 
+  // Starred bookmark property
+  final bool isStarred;
+
   // Runtime values not persisted in database
   double fileTransferProgress; // 0.0 to 1.0
   double fileTransferSpeed; // bytes per second
@@ -43,6 +46,7 @@ class ChatMessage {
     this.replyToBody,
     this.replyToSender,
     this.reaction,
+    this.isStarred = false,
     this.fileTransferProgress = 0.0,
     this.fileTransferSpeed = 0.0,
     this.fileTransferStatus = 'idle',
@@ -66,6 +70,7 @@ class ChatMessage {
     String? replyToBody,
     String? replyToSender,
     String? reaction,
+    bool? isStarred,
     double? fileTransferProgress,
     double? fileTransferSpeed,
     String? fileTransferStatus,
@@ -88,6 +93,7 @@ class ChatMessage {
       replyToBody: replyToBody ?? this.replyToBody,
       replyToSender: replyToSender ?? this.replyToSender,
       reaction: reaction ?? this.reaction,
+      isStarred: isStarred ?? this.isStarred,
       fileTransferProgress: fileTransferProgress ?? this.fileTransferProgress,
       fileTransferSpeed: fileTransferSpeed ?? this.fileTransferSpeed,
       fileTransferStatus: fileTransferStatus ?? this.fileTransferStatus,
@@ -113,6 +119,7 @@ class ChatMessage {
       'reply_to_body': replyToBody,
       'reply_to_sender': replyToSender,
       'reaction': reaction,
+      'is_starred': isStarred ? 1 : 0,
     };
   }
 
@@ -137,6 +144,7 @@ class ChatMessage {
       replyToBody: (rBody == null || rBody == 'null') ? null : rBody,
       replyToSender: (rSender == null || rSender == 'null') ? null : rSender,
       reaction: map['reaction'] == 'null' ? null : map['reaction'],
+      isStarred: map['is_starred'] == 1,
       fileTransferStatus: map['type'] == 'file' ? 'success' : 'idle',
       fileTransferProgress: map['type'] == 'file' ? 1.0 : 0.0,
     );

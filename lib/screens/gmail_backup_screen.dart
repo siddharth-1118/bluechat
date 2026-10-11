@@ -38,6 +38,93 @@ class _GmailBackupScreenState extends State<GmailBackupScreen> {
     super.dispose();
   }
 
+  void _showSmtpSetupDialog() {
+    final emailCtrl = TextEditingController(text: EmailBackupService.instance.configuredUsername);
+    final passCtrl = TextEditingController();
+    final formKey = GlobalKey<FormState>();
+
+    showDialog(
+      context: context,
+      builder: (dialogCtx) => AlertDialog(
+        backgroundColor: const Color(0xFF1E293B),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Text("Sender SMTP Setup", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16)),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: Form(
+            key: formKey,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text(
+                  "Enter the Gmail address and its 16-character Google App Password that BlueChat will use to send backup and OTP emails. Credentials are stored only on this device.",
+                  style: TextStyle(color: Colors.white70, fontSize: 13),
+                ),
+                const SizedBox(height: 16),
+                TextFormField(
+                  controller: emailCtrl,
+                  style: const TextStyle(color: Colors.white),
+                  keyboardType: TextInputType.emailAddress,
+                  decoration: const InputDecoration(labelText: "Sender Gmail address"),
+                  validator: (v) => (v == null || v.trim().isEmpty || !v.contains('@')) ? "Enter a valid email" : null,
+                ),
+                const SizedBox(height: 12),
+                TextFormField(
+                  controller: passCtrl,
+                  style: const TextStyle(color: Colors.white),
+                  obscureText: true,
+                  decoration: const InputDecoration(
+                    labelText: "Google App Password",
+                    helperText: "16 chars, no spaces. Leave blank to keep current.",
+                    helperStyle: TextStyle(color: Colors.white38, fontSize: 11),
+                  ),
+                  validator: (v) {
+                    if (EmailBackupService.instance.configuredUsername.isEmpty && (v == null || v.trim().length < 8)) {
+                      return "Enter the app password";
+                    }
+                    return null;
+                  },
+                ),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          if (EmailBackupService.instance.isConfigured)
+            TextButton(
+              onPressed: () async {
+                await EmailBackupService.instance.clearConfig();
+                if (dialogCtx.mounted) Navigator.pop(dialogCtx);
+                if (mounted) setState(() {});
+              },
+              child: const Text("Clear", style: TextStyle(color: Colors.redAccent)),
+            ),
+          TextButton(
+            onPressed: () => Navigator.pop(dialogCtx),
+            child: const Text("Cancel", style: TextStyle(color: Colors.white54)),
+          ),
+          ElevatedButton(
+            onPressed: () async {
+              if (!(formKey.currentState?.validate() ?? false)) return;
+              final pass = passCtrl.text.trim().isEmpty
+                  ? null
+                  : passCtrl.text.trim();
+              if (pass == null) {
+                Navigator.pop(dialogCtx);
+                return;
+              }
+              await EmailBackupService.instance.saveConfig(emailCtrl.text.trim(), pass);
+              if (dialogCtx.mounted) Navigator.pop(dialogCtx);
+              if (mounted) setState(() {});
+            },
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.blueAccent),
+            child: const Text("Save"),
+          ),
+        ],
+      ),
+    );
+  }
+
   void _showGoogleSignInDialog(BuildContext context, ProfileProvider profileProvider) {
     showDialog(
       context: context,
@@ -538,6 +625,32 @@ class _GmailBackupScreenState extends State<GmailBackupScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                // Outgoing SMTP Setup Card
+                Card(
+                  elevation: 4,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+                  color: isDark ? const Color(0xFF1E293B).withOpacity(0.8) : Colors.white,
+                  child: ListTile(
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+                    leading: Icon(
+                      isSmtpConfigured ? Icons.mail_lock : Icons.mail_outline,
+                      color: isSmtpConfigured ? Colors.green : Colors.blue,
+                    ),
+                    title: const Text("Outgoing Email (SMTP)", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+                    subtitle: Text(
+                      isSmtpConfigured
+                          ? "Sender: ${EmailBackupService.instance.configuredUsername}"
+                          : "Not configured — backups run in simulation mode only.",
+                      style: TextStyle(fontSize: 12, color: isDark ? Colors.white60 : Colors.black54),
+                    ),
+                    trailing: TextButton(
+                      onPressed: _showSmtpSetupDialog,
+                      child: Text(isSmtpConfigured ? "Change" : "Setup"),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+
                 // Account Link Card
                 Card(
                   elevation: 6,

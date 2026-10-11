@@ -1,0 +1,80 @@
+name: Build iOS & Android Apps
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch: # Allows manual trigger from GitHub Actions UI
+
+jobs:
+  build-ios:
+    name: 🍏 Build iOS IPA
+    runs-on: macos-14
+    steps:
+      - name: 📥 Check out repository
+        uses: actions/checkout@v4
+
+      - name: 🛠️ Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      - name: 📦 Install Flutter Dependencies
+        run: flutter pub get
+
+      - name: 🍎 Install CocoaPods
+        run: |
+          cd ios
+          pod install --repo-update
+          cd ..
+
+      - name: 🏗️ Build iOS App (No Codesign)
+        run: flutter build ios --release --no-codesign
+
+      - name: 📦 Package into IPA (Payload Archive)
+        run: |
+          mkdir -p Payload
+          cp -R build/ios/iphoneos/Runner.app Payload/
+          zip -r BlueChat-iOS.ipa Payload
+
+      - name: 🚀 Upload iOS IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BlueChat-iOS-IPA
+          path: BlueChat-iOS.ipa
+          retention-days: 14
+
+  build-android:
+    name: 🤖 Build Android APK
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 Check out repository
+        uses: actions/checkout@v4
+
+      - name: ☕ Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: 'gradle'
+
+      - name: 🛠️ Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      - name: 📦 Install Dependencies
+        run: flutter pub get
+
+      - name: 🏗️ Build Android APK
+        run: flutter build apk --debug
+
+      - name: 🚀 Upload Android APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BlueChat-Android-APK
+          path: build/app/outputs/flutter-apk/app-debug.apk
+          retention-days: 14

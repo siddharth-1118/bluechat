@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:path/path.dart';
+import 'package:intl/intl.dart';
 import 'package:sqflite/sqflite.dart';
 import 'package:crypto/crypto.dart';
 import '../database/database_helper.dart';
@@ -16,6 +17,7 @@ import '../models/bluetooth_peer.dart';
 import '../services/bluetooth_service.dart';
 import '../services/encryption_service.dart';
 import '../services/signal_weaver_service.dart';
+import '../services/wan_link_service.dart';
 import '../services/email_backup_service.dart';
 
 class ChatProvider with ChangeNotifier {
@@ -60,6 +62,10 @@ class ChatProvider with ChangeNotifier {
   StreamSubscription? _messageSub;
   StreamSubscription? _progressSub;
   StreamSubscription? _swmpSub;
+  StreamSubscription? _wanSub;
+
+  // Stable device identity used on the cloud relay (Bluetooth MAC).
+  String _myAddress = '';
 
   // Getters
   List<BluetoothPeer> get discoveredDevices => _discoveredDevices;
@@ -83,14 +89,68 @@ class ChatProvider with ChangeNotifier {
   
   Future<void> init() async {
     await loadSessionsFromDb();
-    await _loadOrGenerateDHKeys();
-    
-    // Initialize SignalWeaver Hybrid Services
+    await applyDisappearingToAllSessions();
+    await loadSessionsFromDb();
+    await _loadOrGenerateDHKeys();    // Initialize SignalWeaver Hybrid Services
     final prefs = await SharedPreferences.getInstance();
     final username = prefs.getString('username') ?? 'User';
     await SignalWeaverService.instance.init(username);
-    
+
+    // Start the real WAN cloud relay so far-away contacts (100+ km) are
+    // reachable whenever both sides have any internet connection.
+    _myAddress = (await _bluetooth.getMyAddress()).toUpperCase();
+    if (_myAddress.isEmpty) {
+      _myAddress = 'swmp_${username.toLowerCase()}';
+    }
+    WanLinkService.instance.init(_myAddress);
+    _wanSub = WanLinkService.instance.packetStream.listen(_handleWanPacket);
+
     _startListeningToNativeEvents();
+  }
+
+  Future<void> _handleWanPacket(Map<String, dynamic> packet) async {
+    try {
+      final type = packet['type'] as String? ?? '';
+
+      // Delivery receipt for a message we sent over the relay.
+      if (type == 'wan_ack') {
+        final ackedId = packet['ackedId'] as String?;
+        if (ackedId != null) {
+          await _db.updateMessageStatus(ackedId, 'delivered');
+          final db = await _db.database;
+          final rows = await db.query(
+            'messages',
+            columns: ['session_id'],
+            where: 'id = ?',
+            whereArgs: [ackedId],
+          );
+          if (rows.isNotEmpty) {
+            _updateLocalMessageStatus(rows.first['session_id'] as String, ackedId, 'delivered');
+            notifyListeners();
+          }
+        }
+        return;
+      }
+
+      // Acknowledge relayed traffic so the sender sees 'delivered'.
+      final senderAddress = (packet['senderAddress'] as String? ?? '').trim();
+      final packetId = packet['id'] as String?;
+      if (type != 'typing' && senderAddress.isNotEmpty && packetId != null) {
+        WanLinkService.instance.sendToPeer(senderAddress, {
+          'id': 'wanack_${DateTime.now().microsecondsSinceEpoch}',
+          'type': 'wan_ack',
+          'ackedId': packetId,
+          'sessionId': senderAddress,
+          'senderName': '',
+          'senderAddress': _myAddress,
+          'timestamp': DateTime.now().millisecondsSinceEpoch,
+        });
+      }
+
+      await _handleIncomingMessageMap(packet, senderAddress);
+    } catch (e) {
+      print('ChatProvider: error processing WAN relay packet: $e');
+    }
   }
 
   Future<void> _loadOrGenerateDHKeys() async {
@@ -113,7 +173,8 @@ class ChatProvider with ChangeNotifier {
     _activeSessionId = sessionId;
     _bluetooth.setActiveSessionId(sessionId);
     if (sessionId != null) {
-      loadMessagesForSession(sessionId);
+      // Purge any expired messages before showing the conversation.
+      _purgeExpiredMessages(sessionId).then((_) => loadMessagesForSession(sessionId));
       _bluetooth.dismissNotification(sessionId);
       _db.markSessionRead(sessionId).then((_) {
         loadSessionsFromDb();
@@ -136,23 +197,29 @@ class ChatProvider with ChangeNotifier {
     final decryptedMsgs = <ChatMessage>[];
     
     for (var msg in msgs) {
-      if (msg.type == "encrypted_text") {
-        final peer = await _db.getPeer(msg.sessionId);
+      final isEncrypted = msg.type == "encrypted_text" ||
+          msg.type == "encrypted_pending" ||
+          (msg.body.trim().startsWith('{"iv":') && msg.body.contains('"ct":'));
+      if (isEncrypted) {
+        final peer = await _db.getPeer(msg.sessionId) ?? await _db.getPeer(sessionId);
         if (peer != null && peer.sharedKey != null && peer.sharedKey!.isNotEmpty) {
           try {
             final decryptedBody = EncryptionService.instance.decryptText(msg.body, peer.sharedKey!);
-            await _db.updateMessageBodyAndType(msg.id, decryptedBody, "text");
-            decryptedMsgs.add(msg.copyWith(
-              body: decryptedBody,
-              type: "text",
-            ));
+            if (decryptedBody != "[Decryption Failed]" && !decryptedBody.trim().startsWith('{"iv":')) {
+              await _db.updateMessageBodyAndType(msg.id, decryptedBody, "text");
+              decryptedMsgs.add(msg.copyWith(
+                body: decryptedBody,
+                type: "text",
+              ));
+              continue;
+            }
           } catch (e) {
             print("ChatProvider: Decryption failed for message ${msg.id}: $e");
-            decryptedMsgs.add(msg.copyWith(
-              body: "[Decryption Failed]",
-              type: "text",
-            ));
           }
+          decryptedMsgs.add(msg.copyWith(
+            body: "[Decryption Failed]",
+            type: "text",
+          ));
         } else {
           decryptedMsgs.add(msg.copyWith(
             body: "[Encrypted Message - Key Handshake Pending]",
@@ -365,6 +432,25 @@ class ChatProvider with ChangeNotifier {
     );
   }
 
+  /// Real-time Push-to-Talk (PTT) Walkie-Talkie
+  Future<void> startPttWalkieTalkie(String peerAddress) async {
+    try {
+      await _bluetooth.startAudioCall(peerAddress, isVideo: false);
+      print("ChatProvider: PTT Walkie-Talkie transmit started to $peerAddress");
+    } catch (e) {
+      print("ChatProvider: PTT Walkie-Talkie error: $e");
+    }
+  }
+
+  Future<void> stopPttWalkieTalkie() async {
+    try {
+      await _bluetooth.stopAudioCall();
+      print("ChatProvider: PTT Walkie-Talkie transmit stopped");
+    } catch (e) {
+      print("ChatProvider: Error stopping PTT: $e");
+    }
+  }
+
   void _startCallTimer() {
     _callTimer?.cancel();
     _callTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
@@ -475,6 +561,7 @@ class ChatProvider with ChangeNotifier {
           body: _myPublicKeyHex!,
           type: "dh_request",
           senderName: senderName,
+          messageId: messageId,
         );
       } else {
         final peer = await _db.getPeer(sessionId);
@@ -488,6 +575,7 @@ class ChatProvider with ChangeNotifier {
           replyToId: replyToId,
           replyToBody: replyToBody,
           replyToSender: replyToSender,
+          messageId: messageId,
         );
         final finalStatus = success ? "sent" : "failed";
         await _db.updateMessageStatus(messageId, finalStatus);
@@ -514,6 +602,48 @@ class ChatProvider with ChangeNotifier {
       }
     }
     await loadSessionsFromDb();
+  }
+
+  Future<void> _initiateDHKeyExchange(String peerAddress) async {
+    try {
+      await _loadOrGenerateDHKeys();
+      await SignalWeaverService.instance.routeMessage(
+        sessionId: peerAddress,
+        recipientAddress: peerAddress,
+        body: _myPublicKeyHex!,
+        type: "dh_request",
+        senderName: "",
+      );
+      print("ChatProvider: Eager DH key exchange initiated with $peerAddress");
+    } catch (e) {
+      print("ChatProvider: Error initiating eager DH key exchange: $e");
+    }
+  }
+
+  Future<void> _decryptPendingIncomingMessages(String peerAddress, String aesKey) async {
+    final msgs = await _db.getMessages(peerAddress);
+    bool updatedAny = false;
+    for (var msg in msgs) {
+      final isEncryptedFormat = msg.type == "encrypted_text" || 
+          msg.type == "encrypted_pending" ||
+          (msg.body.trim().startsWith('{"iv":') && msg.body.contains('"ct":'));
+      if (isEncryptedFormat) {
+        try {
+          final decrypted = EncryptionService.instance.decryptText(msg.body, aesKey);
+          if (decrypted != "[Decryption Failed]" && !decrypted.trim().startsWith('{"iv":')) {
+            await _db.updateMessageBodyAndType(msg.id, decrypted, "text");
+            updatedAny = true;
+          }
+        } catch (e) {
+          print("ChatProvider: Failed to retroactively decrypt message ${msg.id}: $e");
+        }
+      }
+    }
+    if (updatedAny) {
+      await loadMessagesForSession(peerAddress);
+      await loadSessionsFromDb();
+      notifyListeners();
+    }
   }
 
   Future<void> sendFileMessage({
@@ -633,6 +763,7 @@ class ChatProvider with ChangeNotifier {
         );
         await _db.insertSession(session);
         await loadSessionsFromDb();
+        _initiateDHKeyExchange(address);
       } else if (state == "disconnected" || state == "failed") {
         _connectedDevices.remove(address);
         await _db.updateSessionLastMessage(
@@ -697,12 +828,27 @@ class ChatProvider with ChangeNotifier {
         return;
       }
 
+      // Local address update from native Android layer
+      if (eventType == "myAddressUpdated") {
+        final address = event["address"] as String? ?? "";
+        if (address.isNotEmpty) {
+          _myAddress = address.toUpperCase();
+          SignalWeaverService.instance.updateMyAddress(_myAddress);
+          WanLinkService.instance.init(_myAddress);
+          print("ChatProvider: Updated local Bluetooth MAC address: $_myAddress");
+        }
+        return;
+      }
+
       // Parse normal incoming messages
       try {
         print("ChatProvider: Received Bluetooth native message event: $event");
         final messageJsonString = event["message"] as String;
         final Map<String, dynamic> data = jsonDecode(messageJsonString);
-        final senderAddress = (event["senderAddress"] as String?) ?? (data["senderAddress"] as String?) ?? "";
+        final nativeSenderAddress = event["senderAddress"] as String?;
+        final senderAddress = (nativeSenderAddress != null && nativeSenderAddress.isNotEmpty)
+            ? nativeSenderAddress
+            : ((data["senderAddress"] as String?) ?? "");
         
         await _handleIncomingMessageMap(data, senderAddress);
       } catch (e) {
@@ -859,6 +1005,15 @@ class ChatProvider with ChangeNotifier {
       return;
     }
 
+    if (type == "message_read") {
+      final readMessageId = body;
+      print("ChatProvider: Peer read message $readMessageId");
+      await _db.updateMessageStatus(readMessageId, 'read');
+      _updateLocalMessageStatus(sessionId, readMessageId, 'read');
+      notifyListeners();
+      return;
+    }
+
     if (type == "connection_request") {
       print("ChatProvider: Automatically accepting Connection Request from $senderAddress");
       var peer = await _db.getPeer(senderAddress);
@@ -929,7 +1084,7 @@ class ChatProvider with ChangeNotifier {
       await _loadOrGenerateDHKeys();
       final myPrivateKey = BigInt.parse(_myPrivateKeyHex!, radix: 16);
       final sharedSecret = EncryptionService.instance.calculateSharedSecret(peerPublicKey, myPrivateKey);
-      final aesKey = sha256.convert(sharedSecret.toRadixString(16).codeUnits).toString();
+      final aesKey = EncryptionService.instance.deriveAESKeyHex(sharedSecret);
       
       await _db.updatePeerSharedKey(senderAddress, aesKey);
       
@@ -940,6 +1095,7 @@ class ChatProvider with ChangeNotifier {
         type: "dh_response",
         senderName: "",
       );
+      await _decryptPendingIncomingMessages(senderAddress, aesKey);
       await _sendPendingE2EOMessages(senderAddress, aesKey);
       return;
     }
@@ -952,9 +1108,10 @@ class ChatProvider with ChangeNotifier {
       await _loadOrGenerateDHKeys();
       final myPrivateKey = BigInt.parse(_myPrivateKeyHex!, radix: 16);
       final sharedSecret = EncryptionService.instance.calculateSharedSecret(peerPublicKey, myPrivateKey);
-      final aesKey = sha256.convert(sharedSecret.toRadixString(16).codeUnits).toString();
+      final aesKey = EncryptionService.instance.deriveAESKeyHex(sharedSecret);
       
       await _db.updatePeerSharedKey(senderAddress, aesKey);
+      await _decryptPendingIncomingMessages(senderAddress, aesKey);
       await _sendPendingE2EOMessages(senderAddress, aesKey);
       return;
     }
@@ -963,13 +1120,20 @@ class ChatProvider with ChangeNotifier {
     String actualBody = body;
     String actualType = type;
 
-    if (type == "encrypted_text") {
-      final peer = await _db.getPeer(senderAddress);
+    if (type == "encrypted_text" || (actualBody.trim().startsWith('{"iv":') && actualBody.contains('"ct":'))) {
+      final peer = await _db.getPeer(actualSessionId) ?? await _db.getPeer(senderAddress);
       if (peer != null && peer.sharedKey != null && peer.sharedKey!.isNotEmpty) {
         try {
-          actualBody = EncryptionService.instance.decryptText(body, peer.sharedKey!);
-          actualType = "text";
-          lastMsgText = actualBody;
+          final decrypted = EncryptionService.instance.decryptText(body, peer.sharedKey!);
+          if (decrypted != "[Decryption Failed]" && !decrypted.trim().startsWith('{"iv":')) {
+            actualBody = decrypted;
+            actualType = "text";
+            lastMsgText = actualBody;
+          } else {
+            actualBody = "[Decryption Failed]";
+            actualType = "text";
+            lastMsgText = "[Decryption Failed]";
+          }
         } catch (e) {
           print("ChatProvider: Decryption failed for incoming message: $e");
           actualBody = "[Decryption Failed]";
@@ -982,8 +1146,8 @@ class ChatProvider with ChangeNotifier {
         
         await _loadOrGenerateDHKeys();
         await SignalWeaverService.instance.routeMessage(
-          sessionId: senderAddress,
-          recipientAddress: senderAddress,
+          sessionId: actualSessionId,
+          recipientAddress: actualSessionId,
           body: _myPublicKeyHex!,
           type: "dh_request",
           senderName: "",
@@ -1057,8 +1221,105 @@ class ChatProvider with ChangeNotifier {
     notifyListeners();
   }
 
+  Future<void> updatePeerNotes(String address, String notes) async {
+    await _db.updatePeerNotes(address, notes);
+    notifyListeners();
+  }
+
   Future<BluetoothPeer?> getPeerInfo(String address) async {
     return await _db.getPeer(address);
+  }
+
+  Future<void> toggleMessageStarred(String sessionId, String messageId, bool isStarred) async {
+    await _db.updateMessageStarred(messageId, isStarred);
+    final list = _messagesBySession[sessionId];
+    if (list != null) {
+      final idx = list.indexWhere((m) => m.id == messageId);
+      if (idx != -1) {
+        list[idx] = list[idx].copyWith(isStarred: isStarred);
+      }
+    }
+    notifyListeners();
+  }
+
+  Future<List<ChatMessage>> getStarredMessages() async {
+    return await _db.getStarredMessages();
+  }
+
+  Future<void> markSessionAsRead(String sessionId, String myUsername) async {
+    final list = _messagesBySession[sessionId];
+    if (list == null || list.isEmpty) return;
+    
+    final unreadIncoming = list.where((m) => !m.isSelf && m.status != 'read').toList();
+    if (unreadIncoming.isEmpty) return;
+
+    final db = await _db.database;
+    for (var m in unreadIncoming) {
+      await db.update('messages', {'status': 'read'}, where: 'id = ?', whereArgs: [m.id]);
+    }
+    
+    // Send read receipts to peer over Bluetooth/Mesh
+    final isGroup = sessionId == "group_chat" || sessionId.startsWith("group_");
+    if (!isGroup) {
+      for (var m in unreadIncoming) {
+        SignalWeaverService.instance.routeMessage(
+          sessionId: sessionId,
+          recipientAddress: sessionId,
+          body: m.id,
+          type: "message_read",
+          senderName: myUsername,
+        );
+      }
+    }
+    await loadMessagesForSession(sessionId);
+    await loadSessionsFromDb();
+  }
+
+  /// Emergency SOS Broadcast Mode: Floods all Bluetooth and mesh contacts
+  /// with a high-priority emergency beacon alert
+  Future<void> broadcastSosAlert(String myUsername, {String? customDetails}) async {
+    final sosId = "sos_${DateTime.now().millisecondsSinceEpoch}";
+    final body = "🚨 EMERGENCY SOS BEACON FROM $myUsername: Immediate assistance requested! ${customDetails ?? ''}".trim();
+    
+    // Save to local group chat / emergency session
+    final message = ChatMessage(
+      id: sosId,
+      sessionId: "group_chat",
+      senderName: myUsername,
+      senderAddress: _myAddress,
+      body: body,
+      type: "sos_alert",
+      timestamp: DateTime.now(),
+      status: "sent",
+      isSelf: true,
+    );
+    await _db.insertMessage(message);
+    await _db.updateSessionLastMessage("group_chat", body, message.timestamp.millisecondsSinceEpoch);
+    _addMessageToLocalList("group_chat", message);
+    await loadSessionsFromDb();
+
+    // Broadcast across Bluetooth and Mesh
+    await SignalWeaverService.instance.routeMessage(
+      sessionId: "group_chat",
+      recipientAddress: "group_chat",
+      body: body,
+      type: "sos_alert",
+      senderName: myUsername,
+      messageId: sosId,
+    );
+    notifyListeners();
+  }
+
+  /// Stealth Mode & Quick Panic Wipe: Instantly purges SQLite database and local keys
+  Future<void> performPanicWipe() async {
+    await _db.panicWipeDatabase();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('dh_private_key');
+    await prefs.remove('dh_public_key');
+    _messagesBySession.clear();
+    _chatSessions.clear();
+    _typingPeers.clear();
+    notifyListeners();
   }
 
   Future<void> toggleMessageReaction(String sessionId, String messageId, String? reaction, String senderName) async {
@@ -1417,6 +1678,151 @@ class ChatProvider with ChangeNotifier {
     await performRestoreFromFile(backupFile, gmailAccount);
   }
 
+  // --- Global Message Search ---
+
+  /// Searches messages across all sessions on this device. Encrypted messages
+  /// are decrypted on the fly when the shared key is available.
+  Future<List<ChatMessage>> searchMessages(String query) async {
+    final q = query.trim().toLowerCase();
+    if (q.isEmpty) return [];
+
+    final db = await _db.database;
+    final maps = await db.query('messages', orderBy: 'timestamp DESC', limit: 500);
+
+    final results = <ChatMessage>[];
+    for (var map in maps) {
+      var msg = ChatMessage.fromMap(map);
+      if (msg.type == "encrypted_text") {
+        final peer = await _db.getPeer(msg.sessionId);
+        if (peer != null && peer.sharedKey != null && peer.sharedKey!.isNotEmpty) {
+          try {
+            msg = msg.copyWith(
+              body: EncryptionService.instance.decryptText(msg.body, peer.sharedKey!),
+              type: "text",
+            );
+          } catch (_) {
+            continue;
+          }
+        } else {
+          continue; // Key handshake still pending; searchable text unavailable.
+        }
+      }
+      if (msg.body.toLowerCase().contains(q)) {
+        results.add(msg);
+        if (results.length >= 100) break;
+      }
+    }
+    return results;
+  }
+
+  // --- Disappearing Messages ---
+
+  static const Map<int, String> disappearingOptions = {
+    0: "Off",
+    1: "After 1 minute",
+    60: "After 1 hour",
+    1440: "After 1 day",
+  };
+
+  String? disappearingLabelFor(int minutes) => disappearingOptions[minutes];
+
+  Future<int> getDisappearingMinutes(String sessionId) async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getInt('disappear_minutes_$sessionId') ?? 0;
+  }
+
+  Future<void> setDisappearingMinutes(String sessionId, int minutes) async {
+    final prefs = await SharedPreferences.getInstance();
+    if (minutes > 0) {
+      await prefs.setInt('disappear_minutes_$sessionId', minutes);
+    } else {
+      await prefs.remove('disappear_minutes_$sessionId');
+    }
+    await _purgeExpiredMessages(sessionId);
+    await loadMessagesForSession(sessionId);
+    await loadSessionsFromDb();
+  }
+
+  /// Deletes messages older than the session's disappearing-message window.
+  Future<void> _purgeExpiredMessages(String sessionId) async {
+    final minutes = await getDisappearingMinutes(sessionId);
+    if (minutes <= 0) return;
+    final cutoff = DateTime.now().subtract(Duration(minutes: minutes)).millisecondsSinceEpoch;
+    final db = await _db.database;
+    await db.delete(
+      'messages',
+      where: 'timestamp < ? AND session_id = ? AND type != ?',
+      whereArgs: [cutoff, sessionId, 'system'],
+    );
+  }
+
+  /// Purges expired messages in every session (called at startup).
+  Future<void> applyDisappearingToAllSessions() async {
+    for (var session in _chatSessions) {
+      await _purgeExpiredMessages(session.id);
+    }
+  }
+
+  // --- Chat Export ---
+
+  /// Returns the session's messages with available encryption applied, without
+  /// mutating UI state.
+  Future<List<ChatMessage>> _decryptedMessagesForSession(String sessionId) async {
+    final msgs = await _db.getMessages(sessionId);
+    final out = <ChatMessage>[];
+    for (var msg in msgs) {
+      if (msg.type == "encrypted_text") {
+        final peer = await _db.getPeer(msg.sessionId);
+        if (peer != null && peer.sharedKey != null && peer.sharedKey!.isNotEmpty) {
+          try {
+            out.add(msg.copyWith(
+              body: EncryptionService.instance.decryptText(msg.body, peer.sharedKey!),
+              type: "text",
+            ));
+            continue;
+          } catch (_) {}
+        }
+        out.add(msg.copyWith(body: "[Encrypted message]", type: "text"));
+      } else {
+        out.add(msg);
+      }
+    }
+    return out;
+  }
+
+  /// Writes the conversation to a plain-text file and returns it, so the UI
+  /// can hand it to the system share sheet.
+  Future<File> exportChatToFile(String sessionId) async {
+    String chatName = sessionId;
+    final idx = _chatSessions.indexWhere((s) => s.id == sessionId);
+    if (idx != -1) chatName = _chatSessions[idx].name;
+
+    final msgs = await _decryptedMessagesForSession(sessionId);
+    final df = DateFormat('dd MMM yyyy, hh:mm a');
+
+    final buffer = StringBuffer();
+    buffer.writeln('BlueChat Conversation Export');
+    buffer.writeln('Chat: $chatName');
+    buffer.writeln('Exported: ${df.format(DateTime.now())}');
+    buffer.writeln('Messages: ${msgs.length}');
+    buffer.writeln('=' * 44);
+    for (var m in msgs) {
+      final who = m.isSelf ? 'You' : m.senderName;
+      final text = m.type == 'file'
+          ? '\u{1F4C1} ${m.body}'
+          : m.body.replaceAll('\n', ' ');
+      buffer.writeln('[${df.format(m.timestamp)}] $who: $text');
+    }
+
+    final safeName = chatName.replaceAll(RegExp(r'[^A-Za-z0-9]+'), '_');
+    final file = File(join(
+      Directory.systemTemp.path,
+      'bluechat_${safeName}_${DateTime.now().millisecondsSinceEpoch}.txt',
+    ));
+    await file.writeAsString(buffer.toString());
+    return file;
+  }
+
   @override
   void dispose() {
     _typingTimers.values.forEach((timer) => timer.cancel());
@@ -1426,6 +1832,7 @@ class ChatProvider with ChangeNotifier {
     _messageSub?.cancel();
     _progressSub?.cancel();
     _swmpSub?.cancel();
+    _wanSub?.cancel();
     super.dispose();
   }
 }

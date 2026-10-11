@@ -49,7 +49,7 @@ class EncryptionService {
 
   /// Derives a 256-bit AES key from the shared secret using SHA-256
   String deriveAESKeyHex(BigInt sharedSecret) {
-    final bytes = utf8.encode(sharedSecret.toString());
+    final bytes = utf8.encode(sharedSecret.toRadixString(16));
     final digest = sha256.convert(bytes);
     return digest.toString(); // Hex string representing the 32-byte key
   }

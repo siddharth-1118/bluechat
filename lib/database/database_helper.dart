@@ -7,7 +7,7 @@ import '../models/bluetooth_peer.dart';
 
 class DatabaseHelper {
   static const _databaseName = "bluechat.db";
-  static const _databaseVersion = 4;
+  static const _databaseVersion = 5;
 
   DatabaseHelper._privateConstructor();
   static final DatabaseHelper instance = DatabaseHelper._privateConstructor();
@@ -90,6 +90,14 @@ class DatabaseHelper {
         await db.execute("ALTER TABLE peers ADD COLUMN connection_status TEXT DEFAULT 'none'");
       } catch (_) {}
     }
+    if (oldVersion < 5) {
+      try {
+        await db.execute("ALTER TABLE messages ADD COLUMN is_starred INTEGER DEFAULT 0");
+      } catch (_) {}
+      try {
+        await db.execute("ALTER TABLE peers ADD COLUMN notes TEXT DEFAULT ''");
+      } catch (_) {}
+    }
   }
 
   Future _onCreate(Database db, int version) async {
@@ -127,6 +135,7 @@ class DatabaseHelper {
         reply_to_body TEXT,
         reply_to_sender TEXT,
         reaction TEXT,
+        is_starred INTEGER DEFAULT 0,
         FOREIGN KEY (session_id) REFERENCES sessions (id) ON DELETE CASCADE
       )
     ''');
@@ -142,7 +151,8 @@ class DatabaseHelper {
         shared_key TEXT,
         custom_name TEXT,
         profile_photo TEXT,
-        connection_status TEXT DEFAULT 'none'
+        connection_status TEXT DEFAULT 'none',
+        notes TEXT DEFAULT ''
       )
     ''');
   }
@@ -329,8 +339,8 @@ class DatabaseHelper {
     Database db = await instance.database;
     final List<Map<String, dynamic>> maps = await db.query(
       'peers',
-      where: 'address = ?',
-      whereArgs: [address],
+      where: 'UPPER(address) = ?',
+      whereArgs: [address.toUpperCase()],
     );
     if (maps.isNotEmpty) {
       return BluetoothPeer.fromMap(maps.first);
@@ -340,12 +350,27 @@ class DatabaseHelper {
 
   Future<int> updatePeerSharedKey(String address, String? sharedKey) async {
     Database db = await instance.database;
-    return await db.update(
+    final cleanAddr = address.toUpperCase();
+    final count = await db.update(
       'peers',
       {'shared_key': sharedKey},
-      where: 'address = ?',
-      whereArgs: [address],
+      where: 'UPPER(address) = ?',
+      whereArgs: [cleanAddr],
     );
+    if (count == 0) {
+      return await db.insert(
+        'peers',
+        {
+          'address': cleanAddr,
+          'name': 'Peer',
+          'shared_key': sharedKey,
+          'last_seen': DateTime.now().millisecondsSinceEpoch,
+          'connection_status': 'approved',
+        },
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+    }
+    return count;
   }
 
   Future<int> updatePeerCustomName(String address, String? customName) async {
@@ -396,5 +421,51 @@ class DatabaseHelper {
       where: 'id = ?',
       whereArgs: [messageId],
     );
+  }
+
+  Future<int> updateMessageStarred(String messageId, bool isStarred) async {
+    Database db = await instance.database;
+    return await db.update(
+      'messages',
+      {'is_starred': isStarred ? 1 : 0},
+      where: 'id = ?',
+      whereArgs: [messageId],
+    );
+  }
+
+  Future<List<ChatMessage>> getStarredMessages() async {
+    Database db = await instance.database;
+    final List<Map<String, dynamic>> maps = await db.query(
+      'messages',
+      where: 'is_starred = 1',
+      orderBy: 'timestamp DESC',
+    );
+    return maps.map((m) => ChatMessage.fromMap(m)).toList();
+  }
+
+  Future<int> updatePeerNotes(String address, String notes) async {
+    Database db = await instance.database;
+    return await db.update(
+      'peers',
+      {'notes': notes},
+      where: 'address = ?',
+      whereArgs: [address],
+    );
+  }
+
+  /// Emergency Panic Wipe: securely deletes all messages, sessions, peers, and transit tables
+  Future<void> panicWipeDatabase() async {
+    Database db = await instance.database;
+    await db.transaction((txn) async {
+      await txn.delete('messages');
+      await txn.delete('sessions');
+      await txn.delete('peers');
+      try {
+        await txn.delete('transit_messages');
+      } catch (_) {}
+      try {
+        await txn.delete('seen_messages');
+      } catch (_) {}
+    });
   }
 }

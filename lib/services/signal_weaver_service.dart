@@ -6,6 +6,7 @@ import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'bluetooth_service.dart';
+import 'wan_link_service.dart';
 import '../database/database_helper.dart';
 
 class SignalWeaverService {
@@ -65,6 +66,12 @@ class SignalWeaverService {
   bool get isInternetAvailable => _isInternetAvailable;
   bool get isWanSimulated => _isWanSimulated;
   double get simulatedDistance => _simulatedDistance;
+
+  void updateMyAddress(String address) {
+    if (address.isNotEmpty) {
+      _myMacAddress = address.toUpperCase();
+    }
+  }
 
   // --- Initialization ---
 
@@ -426,6 +433,7 @@ class SignalWeaverService {
     String? replyToBody,
     String? replyToSender,
     List<String>? membersList,
+    String? messageId,
   }) async {
     // Reload my address in case it was updated natively
     final resolvedMac = await BluetoothService.instance.getMyAddress();
@@ -433,7 +441,9 @@ class SignalWeaverService {
       _myMacAddress = resolvedMac.toUpperCase();
     }
 
-    final packetId = "${DateTime.now().millisecondsSinceEpoch}_${Random().nextInt(100000)}";
+    // Reuse the caller's message id when provided so cloud-relay delivery
+    // ACKs can be correlated with the stored message.
+    final packetId = messageId ?? "${DateTime.now().millisecondsSinceEpoch}_${Random().nextInt(100000)}";
     final isGroup = recipientAddress == 'group_chat' || recipientAddress.startsWith('group_');
     
     final cleanRecipient = recipientAddress.toUpperCase();
@@ -488,6 +498,31 @@ class SignalWeaverService {
       "status": routedSuccessfully ? "sent" : "failed",
       "timestamp": DateTime.now().millisecondsSinceEpoch,
     });
+
+    // Cloud relay fallback: if Bluetooth could not deliver (peer far away,
+    // e.g. 100+ km), publish over the real WAN transport. Chat content is
+    // already end-to-end encrypted upstream, so the relay only sees ciphertext.
+    final canUseWan = !isGroup &&        !routedSuccessfully &&        type != 'call_invite' &&
+        type != 'call_accept' &&
+        type != 'call_decline' &&
+        type != 'call_hangup' &&
+        type != 'file';
+
+    if (canUseWan) {
+      final wanOk = WanLinkService.instance.sendToPeer(recipientAddress, packet);
+      if (wanOk) routedSuccessfully = true;
+      _recordRoutingLog({
+        "direction": "outgoing",
+        "packetId": packetId,
+        "sender": "Me",
+        "recipient": recipientAddress.length > 8 ? recipientAddress.substring(0, 8) : recipientAddress,
+        "transport": wanOk ? "Cloud Relay [WAN]" : "Cloud Relay [Queued]",
+        "hops": 0,
+        "distance": 0.0,
+        "status": wanOk ? "sent" : "queued",
+        "timestamp": DateTime.now().millisecondsSinceEpoch,
+      });
+    }
 
     return routedSuccessfully;
   }

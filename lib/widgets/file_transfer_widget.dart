@@ -116,6 +116,37 @@ class FileTransferWidget extends StatelessWidget {
     }
   }
 
+  void _shareFile(BuildContext context) async {
+    if (message.filePath == null) return;
+    final file = File(message.filePath!);
+    if (!await file.exists()) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text("File no longer exists locally."),
+            backgroundColor: Colors.redAccent,
+          ),
+        );
+      }
+      return;
+    }
+
+    final mimeType = FileTransferService.getMimeType(message.fileName);
+    final success = await BluetoothService.instance.shareFile(
+      message.filePath!,
+      mimeType: mimeType,
+    );
+
+    if (!success && context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text("Could not open the share sheet for this file."),
+          backgroundColor: Colors.redAccent,
+        ),
+      );
+    }
+  }
+
   void _showUpiPaymentDialog(BuildContext context, String upiUri) async {
     final uri = Uri.parse(upiUri);
     final payeeVpa = uri.queryParameters['pa'] ?? '';
@@ -504,6 +535,18 @@ class FileTransferWidget extends StatelessWidget {
                   Row(
                     mainAxisAlignment: MainAxisAlignment.end,
                     children: [
+                      TextButton.icon(
+                        onPressed: () => _shareFile(context),
+                        icon: Icon(Icons.share, size: 16, color: isDark ? Colors.white70 : Colors.black54),
+                        label: Text(
+                          "Share",
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: isDark ? Colors.white70 : Colors.black54,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8.0),
                       Text(
                         "Tap to open",
                         style: theme.textTheme.bodySmall?.copyWith(

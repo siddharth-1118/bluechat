@@ -10,6 +10,7 @@ class ChatBubble extends StatelessWidget {
   final Function(ChatMessage)? onReply;
   final Function(String?)? onReact;
   final Function(ChatMessage)? onForward;
+  final VoidCallback? onToggleStar;
 
   const ChatBubble({
     Key? key,
@@ -18,6 +19,7 @@ class ChatBubble extends StatelessWidget {
     this.onReply,
     this.onReact,
     this.onForward,
+    this.onToggleStar,
   }) : super(key: key);
 
   @override
@@ -25,10 +27,14 @@ class ChatBubble extends StatelessWidget {
     final theme = Theme.of(context);
     final isDark = theme.brightness == Brightness.dark;
     
-    final bgSelf = isDark ? const Color(0xFF0F5A47) : const Color(0xFFDCF8C6);
-    final bgOther = isDark ? const Color(0xFF252D32) : Colors.white;
-    final textSelf = isDark ? Colors.white : Colors.black87;
-    final textOther = isDark ? Colors.white : Colors.black87;
+    final bgSelf = message.type == 'sos_alert'
+        ? Colors.red.shade900
+        : (isDark ? const Color(0xFF0F5A47) : const Color(0xFFDCF8C6));
+    final bgOther = message.type == 'sos_alert'
+        ? Colors.red.shade800
+        : (isDark ? const Color(0xFF252D32) : Colors.white);
+    final textSelf = isDark ? Colors.white : (message.type == 'sos_alert' ? Colors.white : Colors.black87);
+    final textOther = isDark ? Colors.white : (message.type == 'sos_alert' ? Colors.white : Colors.black87);
 
     final align = message.isSelf ? CrossAxisAlignment.end : CrossAxisAlignment.start;
     final margin = message.isSelf 
@@ -48,7 +54,9 @@ class ChatBubble extends StatelessWidget {
         case 'sent':
           return const Icon(Icons.check, size: 14, color: Colors.white54);
         case 'delivered':
-          return const Icon(Icons.done_all, size: 14, color: Colors.cyanAccent);
+          return const Icon(Icons.done_all, size: 14, color: Colors.white70);
+        case 'read':
+          return const Icon(Icons.done_all, size: 14, color: Colors.lightBlueAccent); // True Blue Ticks
         case 'failed':
           return const Icon(Icons.error_outline, size: 14, color: Colors.redAccent);
         default:
@@ -176,6 +184,22 @@ class ChatBubble extends StatelessWidget {
                   ),
                 ),
               )
+            else if (message.type == 'encrypted_pending' || (message.body.trim().startsWith('{"iv":') && message.body.contains('"ct":')))
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.lock_clock, size: 16, color: Colors.amberAccent),
+                  const SizedBox(width: 6.0),
+                  Text(
+                    "Encrypted Message (Handshake Pending)",
+                    style: TextStyle(
+                      color: message.isSelf ? textSelf : textOther,
+                      fontStyle: FontStyle.italic,
+                      fontSize: 14,
+                    ),
+                  ),
+                ],
+              )
             else
               Text(
                 message.body,
@@ -189,6 +213,10 @@ class ChatBubble extends StatelessWidget {
               mainAxisAlignment: MainAxisAlignment.end,
               mainAxisSize: MainAxisSize.min,
               children: [
+                if (message.isStarred) ...[
+                  const Icon(Icons.star, size: 12, color: Colors.amber),
+                  const SizedBox(width: 3.0),
+                ],
                 Text(
                   timeStr,
                   style: TextStyle(
@@ -314,6 +342,15 @@ class ChatBubble extends StatelessWidget {
                       onTap: () {
                         Navigator.pop(context);
                         onReply!(message);
+                      },
+                    ),
+                  if (onToggleStar != null)
+                    ListTile(
+                      leading: Icon(message.isStarred ? Icons.star_border : Icons.star, color: Colors.amber),
+                      title: Text(message.isStarred ? 'Unstar Message' : 'Star Message', style: TextStyle(color: isDark ? Colors.white : Colors.black87)),
+                      onTap: () {
+                        Navigator.pop(context);
+                        onToggleStar!();
                       },
                     ),
                   if (onForward != null && (message.type == 'text' || message.type == 'file'))

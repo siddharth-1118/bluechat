@@ -434,9 +434,13 @@ class BluetoothConnectionManager(private val context: Context) {
                         )
                         sendEvent(deviceDiscoverySink, mapOf("type" to "deviceFound", "device" to deviceMap))
 
-                        if (name.startsWith("BlueChat_")) {
+                        val isSaved = getSavedPeerAddresses(context).contains(it.address)
+                        val isBonded = it.bondState == BluetoothDevice.BOND_BONDED
+                        val isBlueChatName = name.startsWith("BlueChat", ignoreCase = true)
+
+                        if (isBlueChatName || isBonded || isSaved) {
                             if (!isConnected(it.address) && !isConnecting(it.address)) {
-                                Log.d("BlueChat", "Auto-discovered BlueChat peer: $name (${it.address}). Connecting...")
+                                Log.d("BlueChat", "Auto-discovered peer: $name (${it.address}) [isBlueChat=$isBlueChatName, isBonded=$isBonded, isSaved=$isSaved]. Connecting...")
                                 connectToDevice(it.address)
                             }
                         }
@@ -610,7 +614,22 @@ class BluetoothConnectionManager(private val context: Context) {
                 attempt++
                 Log.d("BlueChat", "Connecting to ${device.address}, attempt $attempt of $maxAttempts")
                 try {
-                    val tempSocket = device.createInsecureRfcommSocketToServiceRecord(APP_UUID)
+                    val tempSocket = if (attempt == 1) {
+                        device.createInsecureRfcommSocketToServiceRecord(APP_UUID)
+                    } else if (attempt == 2) {
+                        try {
+                            device.createRfcommSocketToServiceRecord(APP_UUID)
+                        } catch (e: Exception) {
+                            device.createInsecureRfcommSocketToServiceRecord(APP_UUID)
+                        }
+                    } else {
+                        try {
+                            val m = device.javaClass.getMethod("createRfcommSocket", Int::class.javaPrimitiveType)
+                            m.invoke(device, 1) as BluetoothSocket
+                        } catch (ex: Exception) {
+                            device.createInsecureRfcommSocketToServiceRecord(APP_UUID)
+                        }
+                    }
                     socket = tempSocket
 
                     // Timeout connection task
@@ -1170,7 +1189,7 @@ class BluetoothConnectionManager(private val context: Context) {
                 val msgId = json.optString("id")
                 val recipientAddress = json.optString("recipientAddress", json.optString("sessionId"))
                 var senderAddress = json.optString("senderAddress")
-                if (senderAddress.isEmpty()) {
+                if (senderAddress.isEmpty() || !senderAddress.contains(":") || senderAddress.startsWith("swmp_")) {
                     senderAddress = fromAddress
                 }
                 val hopCount = json.optInt("hopCount", 0)
@@ -1190,6 +1209,12 @@ class BluetoothConnectionManager(private val context: Context) {
                 if (jsonType == "sys_your_address") {
                     val myAddr = json.getString("address")
                     saveMyAddress(context, myAddr)
+                    if (messageSink != null) {
+                        sendEvent(messageSink, mapOf(
+                            "type" to "myAddressUpdated",
+                            "address" to myAddr
+                        ))
+                    }
                     return
                 }
 
@@ -1220,8 +1245,9 @@ class BluetoothConnectionManager(private val context: Context) {
                 val myAddress = getMyAddress(context)
                 val isForMe = recipientAddress == "group_chat" ||
                               recipientAddress.startsWith("group_") ||
-                              (myAddress.isNotEmpty() && recipientAddress == myAddress) ||
-                              (myAddress.isEmpty() && recipientAddress != fromAddress && !activeConnections.containsKey(recipientAddress))
+                              (myAddress.isNotEmpty() && recipientAddress.equals(myAddress, ignoreCase = true)) ||
+                              (recipientAddress.equals(fromAddress, ignoreCase = true)) ||
+                              (myAddress.isEmpty())
 
                 if (isForMe) {
                     val isGroup = recipientAddress == "group_chat" || recipientAddress.startsWith("group_")
